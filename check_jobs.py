@@ -118,21 +118,21 @@ def send_telegram(jobs):
     if not token or not chat_id:
         return
 
-    for j in jobs[:5]:  # avoid spam burst
-        text = f"""
-<b>{html.escape(j['title'])}</b>
-{html.escape(j['company'])} | {html.escape(j['location'])}
-<a href="{j['link']}">View Job</a>
-"""
+    message = "<b>New QA Jobs (Last Hour)</b>\n\n"
 
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
+    for j in jobs[:10]:
+        message += f"• <b>{j['title']}</b>\n"
+        message += f"{j['company']} | {j['location']}\n"
+        message += f"<a href='{j['link']}'>View Job</a>\n\n"
 
-        requests.post(url, data={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        })
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    requests.post(url, data={
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    })
 
 # ---------- MAIN ----------
 def main():
