@@ -20,7 +20,6 @@ def fetch_indeed():
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
-        print(r.text[:500])
 
         for card in soup.select("a.tapItem"):
             title_el = card.select_one("h2 span")
