@@ -7,68 +7,88 @@ import smtplib
 from email.mime.text import MIMEText
 import html
 
-SEARCH_URL = "https://www.google.com/search?q=(%22QA%22+OR+%22SDET%22+OR+%22QA+Engineer%22+OR+%22QA+Analyst%22+OR+%22Scrum+Master%22)+(%22Toronto%22+OR+%22Remote%22+OR+%22Canada%22)+(site%3Alinkedin.com%2Fjobs+OR+site%3Aindeed.com+OR+site%3Aglassdoor.ca)&tbs=qdr%3Ah"
-
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept-Language": "en-US,en;q=0.9"
 }
 
-# ---------- FETCH ----------
-def fetch():
+# ---------- INDEED ----------
+def fetch_indeed():
+    url = "https://ca.indeed.com/jobs?q=QA+SDET+Automation+Tester&l=Toronto%2C+ON&fromage=1"
+    jobs = []
+
     try:
-        r = requests.get(SEARCH_URL, headers=HEADERS, timeout=15)
+        r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
 
-        jobs = []
+        for card in soup.select("a.tapItem"):
+            title_el = card.select_one("h2 span")
+            company_el = card.select_one(".companyName")
+            location_el = card.select_one(".companyLocation")
 
-        for g in soup.select("div.g"):
-            a = g.find("a")
-            h3 = g.find("h3")
+            title = title_el.text.strip() if title_el else "Unknown"
+            company = company_el.text.strip() if company_el else "Unknown"
+            location = location_el.text.strip() if location_el else "Unknown"
 
-            if not a or not h3:
-                continue
+            link = "https://ca.indeed.com" + card.get("href")
 
-            href = a.get("href", "")
-            title = h3.get_text(strip=True)
-            snippet = g.get_text(" ", strip=True)
-
-            if "/url?q=" in href:
-                link = href.split("/url?q=")[1].split("&")[0]
-
-                if any(x in link for x in ["linkedin.com/jobs", "indeed.com", "glassdoor.ca"]):
-                    company, location = extract_company_location(snippet)
-
-                    jobs.append({
-                        "title": title,
-                        "link": link,
-                        "company": company,
-                        "location": location
-                    })
-
-        return jobs
+            jobs.append({
+                "title": title,
+                "company": company,
+                "location": location,
+                "link": link,
+                "source": "Indeed"
+            })
 
     except Exception as e:
-        print("Fetch error:", e)
-        return []
+        print("Indeed error:", e)
 
-# ---------- EXTRACTION ----------
-def extract_company_location(text):
-    parts = text.split(" - ")
+    return jobs
 
-    company = "Unknown"
-    location = "Unknown"
+# ---------- LINKEDIN ----------
+def fetch_linkedin():
+    url = "https://www.linkedin.com/jobs/search/?keywords=QA&location=Toronto&f_TPR=r3600"
+    jobs = []
 
-    if len(parts) >= 2:
-        company = parts[0][:80]
-        location = parts[1][:80]
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
 
-    return company, location
+        for card in soup.select("li"):
+            title_el = card.select_one("h3")
+            company_el = card.select_one("h4")
+            location_el = card.select_one(".job-search-card__location")
+            link_el = card.select_one("a")
 
-# ---------- HASH ----------
-def hash_title(title):
-    return hashlib.md5(title.lower().encode()).hexdigest()
+            if not title_el or not link_el:
+                continue
 
-# ---------- STORAGE ----------
+            jobs.append({
+                "title": title_el.text.strip(),
+                "company": company_el.text.strip() if company_el else "Unknown",
+                "location": location_el.text.strip() if location_el else "Unknown",
+                "link": link_el.get("href"),
+                "source": "LinkedIn"
+            })
+
+    except Exception as e:
+        print("LinkedIn error:", e)
+
+    return jobs
+
+# ---------- COMBINE ----------
+def fetch_all():
+    jobs = []
+    jobs += fetch_indeed()
+    jobs += fetch_linkedin()
+    print(f"Fetched total jobs: {len(jobs)}")
+    return jobs
+
+# ---------- DEDUP ----------
+def hash_job(job):
+    key = (job["title"] + job["company"] + job["location"]).lower()
+    return hashlib.md5(key.encode()).hexdigest()
+
 def load():
     if not os.path.exists("seen.json"):
         return {}
@@ -88,17 +108,19 @@ def build_email(jobs):
             <td>{html.escape(j['title'])}</td>
             <td>{html.escape(j['company'])}</td>
             <td>{html.escape(j['location'])}</td>
+            <td>{j['source']}</td>
             <td><a href="{j['link']}">View</a></td>
         </tr>
         """
 
     return f"""
-    <h3>New QA Jobs (Last Hour)</h3>
+    <h3>New Jobs (Multi-Source)</h3>
     <table border="1" cellpadding="6" cellspacing="0">
         <tr>
             <th>Title</th>
             <th>Company</th>
             <th>Location</th>
+            <th>Source</th>
             <th>Link</th>
         </tr>
         {rows}
@@ -111,7 +133,7 @@ def send_email(jobs):
 
     try:
         msg = MIMEText(build_email(jobs), "html")
-        msg["Subject"] = "QA Job Alerts (Hourly)"
+        msg["Subject"] = "QA Job Alerts"
         msg["From"] = os.environ.get("EMAIL_USER")
         msg["To"] = os.environ.get("EMAIL_TO")
 
@@ -134,12 +156,12 @@ def send_telegram(jobs):
         return
 
     try:
-        message = "<b>New QA Jobs (Last Hour)</b>\n\n"
+        message = "<b>New Jobs</b>\n\n"
 
         for j in jobs[:10]:
             message += f"• <b>{html.escape(j['title'])}</b>\n"
             message += f"{html.escape(j['company'])} | {html.escape(j['location'])}\n"
-            message += f"<a href='{j['link']}'>View Job</a>\n\n"
+            message += f"[{j['source']}] <a href='{j['link']}'>View</a>\n\n"
 
         url = f"https://api.telegram.org/bot{token}/sendMessage"
 
@@ -155,21 +177,21 @@ def send_telegram(jobs):
 
 # ---------- MAIN ----------
 def main():
-    current = fetch()
+    current = fetch_all()
     previous = load()
 
     new_jobs = []
     updated = previous.copy()
 
     for j in current:
-        h = hash_title(j["title"])
+        h = hash_job(j)
 
         if h not in previous:
             new_jobs.append(j)
 
         updated[h] = j["link"]
 
-    print(f"Found {len(new_jobs)} new jobs")
+    print(f"New jobs found: {len(new_jobs)}")
 
     send_email(new_jobs)
     send_telegram(new_jobs)
