@@ -12,6 +12,39 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9"
 }
 
+# ---------- FILTER (YOUR GOOGLE LOGIC) ----------
+def is_relevant(job):
+    title = job["title"].lower()
+    company = job["company"].lower()
+    location = job["location"].lower()
+
+    full_text = f"{title} {company} {location}"
+
+    # MUST match title
+    title_keywords = [
+        "qa", "quality assurance", "sdet",
+        "qa engineer", "qa analyst",
+        "automation tester", "test engineer",
+        "scrum master"
+    ]
+
+    if not any(k in title for k in title_keywords):
+        return False
+
+    # MUST match location
+    location_keywords = ["toronto", "remote", "canada"]
+
+    if not any(k in location for k in location_keywords):
+        return False
+
+    # EXCLUDE noise
+    exclude_keywords = ["course", "bootcamp", "training", "certificate", "pdf"]
+
+    if any(k in full_text for k in exclude_keywords):
+        return False
+
+    return True
+
 # ---------- INDEED ----------
 def fetch_indeed():
     url = "https://ca.indeed.com/jobs?q=QA+SDET+Automation+Tester&l=Toronto%2C+ON&fromage=1"
@@ -114,7 +147,7 @@ def build_email(jobs):
         """
 
     return f"""
-    <h3>New Jobs (Multi-Source)</h3>
+    <h3>New QA / Scrum Jobs</h3>
     <table border="1" cellpadding="6" cellspacing="0">
         <tr>
             <th>Title</th>
@@ -156,7 +189,7 @@ def send_telegram(jobs):
         return
 
     try:
-        message = "<b>New Jobs</b>\n\n"
+        message = "<b>New QA / Scrum Jobs</b>\n\n"
 
         for j in jobs[:10]:
             message += f"• <b>{html.escape(j['title'])}</b>\n"
@@ -184,6 +217,9 @@ def main():
     updated = previous.copy()
 
     for j in current:
+        if not is_relevant(j):
+            continue
+
         h = hash_job(j)
 
         if h not in previous:
