@@ -18,6 +18,7 @@ def fetch():
     try:
         r = requests.get(SEARCH_URL, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
+        print(r.text[:500])
 
         jobs = []
 
