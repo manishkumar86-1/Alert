@@ -1,4 +1,4 @@
-# Job Alerts (Free - GitHub Actions आधारित)
+# Job Alerts (Free - GitHub Actions)
 
 This project runs a Google job search every hour and emails new results.
 
