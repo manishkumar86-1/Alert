@@ -1,38 +1,58 @@
-name: Job Alerts
+name: Scrum Master Job Alerts
 
 permissions:
   contents: write
 
 on:
   schedule:
+    # Run every hour
     - cron: "0 * * * *"
+
   workflow_dispatch:
+
+# Prevent two runs from modifying seen.json simultaneously.
+concurrency:
+  group: scrum-master-job-alerts
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - run: python check_jobs.py
+      - name: Check Scrum Master jobs
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-
-      - name: Save state
         run: |
-          git config --global user.name "bot"
-          git config --global user.email "bot@example.com"
-          git add seen.json || true
-          git commit -m "update seen jobs" || true
-          git push
+          python check_jobs.py
+
+      - name: Save job state
+        run: |
+          git config user.name "scrum-master-job-alert-bot"
+          git config user.email "bot@example.com"
+
+          git add seen.json
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update Scrum Master job state"
+            git push
+          fi
