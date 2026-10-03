@@ -1,237 +1,667 @@
-import requests
-from bs4 import BeautifulSoup
-import hashlib
 import json
 import os
 import smtplib
-from email.mime.text import MIMEText
 import html
+from urllib.parse import urljoin, urlparse
+
+import requests
+from bs4 import BeautifulSoup
+from email.mime.text import MIMEText
+
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Accept-Language": "en-US,en;q=0.9"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
-# ---------- FILTER (YOUR GOOGLE LOGIC) ----------
+SEEN_FILE = "seen.json"
+
+
+# ============================================================
+# JOB FILTER
+# ============================================================
+
 def is_relevant(job):
-    title = job["title"].lower()
-    company = job["company"].lower()
-    location = job["location"].lower()
+    """
+    Only Scrum Master roles are relevant.
+    QA, SDET, Tester, etc. are intentionally NOT included.
+    """
 
-    full_text = f"{title} {company} {location}"
+    title = job.get("title", "").strip().lower()
+    location = job.get("location", "").strip().lower()
 
-    # MUST match title
-    title_keywords = [
-        "qa", "quality assurance", "sdet",
-        "qa engineer", "qa analyst",
-        "automation tester", "test engineer",
-        "scrum master"
+    if not title:
+        return False
+
+    # ONLY Scrum Master roles
+    if "scrum master" not in title:
+        return False
+
+    # Toronto / GTA OR Remote Canada
+    toronto_locations = [
+        "toronto",
+        "north york",
+        "scarborough",
+        "etobicoke",
+        "markham",
+        "richmond hill",
+        "vaughan",
+        "thornhill",
+        "mississauga",
+        "brampton",
+        "oakville",
+        "ajax",
+        "pickering",
+        "whitby",
+        "oshawa",
+        "gta",
     ]
 
-    if not any(k in title for k in title_keywords):
+    remote_locations = [
+        "remote",
+        "canada",
+    ]
+
+    location_match = (
+        any(value in location for value in toronto_locations)
+        or (
+            "remote" in location
+            and "canada" in location
+        )
+    )
+
+    if not location_match:
         return False
 
-    # MUST match location
-    location_keywords = ["toronto", "remote", "canada"]
+    # Avoid obvious non-job results
+    excluded = [
+        "course",
+        "bootcamp",
+        "training",
+        "certificate",
+        "certification course",
+    ]
 
-    if not any(k in location for k in location_keywords):
-        return False
-
-    # EXCLUDE noise
-    exclude_keywords = ["course", "bootcamp", "training", "certificate", "pdf"]
-
-    if any(k in full_text for k in exclude_keywords):
+    if any(value in title for value in excluded):
         return False
 
     return True
 
-# ---------- INDEED ----------
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def normalize_url(url, base_url):
+    """Return a clean absolute URL."""
+    if not url:
+        return ""
+
+    url = url.strip()
+
+    absolute = urljoin(base_url, url)
+
+    # Remove fragment
+    parsed = urlparse(absolute)
+    return parsed._replace(fragment="").geturl()
+
+
+def job_id(job):
+    """
+    Use the actual posting URL as the stable identifier.
+
+    This is much safer than using:
+        title + company + location
+
+    because a company can have multiple Scrum Master
+    openings with the same title/location.
+    """
+
+    link = job.get("link", "").strip()
+
+    if link:
+        return link
+
+    # Fallback only if a source doesn't provide a URL.
+    title = job.get("title", "").strip().lower()
+    company = job.get("company", "").strip().lower()
+    location = job.get("location", "").strip().lower()
+
+    return f"{title}|{company}|{location}"
+
+
+# ============================================================
+# INDEED
+# ============================================================
+
 def fetch_indeed():
-    url = "https://ca.indeed.com/jobs?q=QA+SDET+Automation+Tester&l=Toronto%2C+ON&fromage=1"
+    """
+    Search Indeed for Scrum Master jobs in Toronto.
+
+    The search itself is restricted to Scrum Master.
+    """
+
+    url = (
+        "https://ca.indeed.com/jobs"
+        "?q=%22Scrum+Master%22"
+        "&l=Toronto%2C+ON"
+        "&fromage=1"
+    )
+
     jobs = []
 
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=20,
+        )
 
-        for card in soup.select("a.tapItem"):
-            title_el = card.select_one("h2 span")
-            company_el = card.select_one(".companyName")
-            location_el = card.select_one(".companyLocation")
+        response.raise_for_status()
 
-            title = title_el.text.strip() if title_el else "Unknown"
-            company = company_el.text.strip() if company_el else "Unknown"
-            location = location_el.text.strip() if location_el else "Unknown"
+        soup = BeautifulSoup(response.text, "html.parser")
 
-            link = "https://ca.indeed.com" + card.get("href")
+        cards = soup.select("a.tapItem")
 
-            jobs.append({
-                "title": title,
-                "company": company,
-                "location": location,
-                "link": link,
-                "source": "Indeed"
-            })
+        print(f"Indeed cards found: {len(cards)}")
 
-    except Exception as e:
-        print("Indeed error:", e)
+        for card in cards:
+            try:
+                title_el = card.select_one("h2 span")
+                company_el = card.select_one(".companyName")
+                location_el = card.select_one(".companyLocation")
 
-    return jobs
+                if not title_el:
+                    continue
 
-# ---------- LINKEDIN ----------
-def fetch_linkedin():
-    url = "https://www.linkedin.com/jobs/search/?keywords=QA&location=Toronto&f_TPR=r3600"
-    jobs = []
+                raw_link = card.get("href")
 
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
+                if not raw_link:
+                    continue
 
-        for card in soup.select("li"):
-            title_el = card.select_one("h3")
-            company_el = card.select_one("h4")
-            location_el = card.select_one(".job-search-card__location")
-            link_el = card.select_one("a")
+                title = title_el.get_text(" ", strip=True)
+                company = (
+                    company_el.get_text(" ", strip=True)
+                    if company_el
+                    else "Unknown"
+                )
+                location = (
+                    location_el.get_text(" ", strip=True)
+                    if location_el
+                    else "Unknown"
+                )
 
-            if not title_el or not link_el:
+                link = normalize_url(
+                    raw_link,
+                    "https://ca.indeed.com",
+                )
+
+                job = {
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "link": link,
+                    "source": "Indeed",
+                }
+
+                if is_relevant(job):
+                    jobs.append(job)
+
+            except Exception as error:
+                print(f"Indeed card error: {error}")
                 continue
 
-            jobs.append({
-                "title": title_el.text.strip(),
-                "company": company_el.text.strip() if company_el else "Unknown",
-                "location": location_el.text.strip() if location_el else "Unknown",
-                "link": link_el.get("href"),
-                "source": "LinkedIn"
-            })
+    except requests.RequestException as error:
+        print(f"Indeed request error: {error}")
 
-    except Exception as e:
-        print("LinkedIn error:", e)
+    except Exception as error:
+        print(f"Indeed error: {error}")
 
     return jobs
 
-# ---------- COMBINE ----------
-def fetch_all():
+
+# ============================================================
+# LINKEDIN
+# ============================================================
+
+def fetch_linkedin():
+    """
+    Search LinkedIn for Scrum Master jobs in Toronto.
+
+    f_TPR=r3600 = jobs posted in approximately the last hour.
+    """
+
+    url = (
+        "https://www.linkedin.com/jobs/search/"
+        "?keywords=Scrum%20Master"
+        "&location=Toronto"
+        "&f_TPR=r3600"
+    )
+
     jobs = []
-    jobs += fetch_indeed()
-    jobs += fetch_linkedin()
-    print(f"Fetched total jobs: {len(jobs)}")
+
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        cards = soup.select("li")
+
+        print(f"LinkedIn cards found: {len(cards)}")
+
+        for card in cards:
+            try:
+                title_el = card.select_one("h3")
+                company_el = card.select_one("h4")
+                location_el = card.select_one(
+                    ".job-search-card__location"
+                )
+                link_el = card.select_one(
+                    "a.base-card__full-link"
+                )
+
+                # Fallback if LinkedIn changes the link class.
+                if not link_el:
+                    link_el = card.select_one("a")
+
+                if not title_el or not link_el:
+                    continue
+
+                raw_link = link_el.get("href")
+
+                if not raw_link:
+                    continue
+
+                title = title_el.get_text(" ", strip=True)
+
+                company = (
+                    company_el.get_text(" ", strip=True)
+                    if company_el
+                    else "Unknown"
+                )
+
+                location = (
+                    location_el.get_text(" ", strip=True)
+                    if location_el
+                    else "Unknown"
+                )
+
+                link = normalize_url(
+                    raw_link,
+                    "https://www.linkedin.com",
+                )
+
+                job = {
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "link": link,
+                    "source": "LinkedIn",
+                }
+
+                if is_relevant(job):
+                    jobs.append(job)
+
+            except Exception as error:
+                print(f"LinkedIn card error: {error}")
+                continue
+
+    except requests.RequestException as error:
+        print(f"LinkedIn request error: {error}")
+
+    except Exception as error:
+        print(f"LinkedIn error: {error}")
+
     return jobs
 
-# ---------- DEDUP ----------
-def hash_job(job):
-    key = (job["title"] + job["company"] + job["location"]).lower()
-    return hashlib.md5(key.encode()).hexdigest()
+
+# ============================================================
+# COMBINE SOURCES
+# ============================================================
+
+def fetch_all():
+    indeed_jobs = fetch_indeed()
+    linkedin_jobs = fetch_linkedin()
+
+    jobs = indeed_jobs + linkedin_jobs
+
+    # Remove duplicate URLs from the same run.
+    unique = {}
+
+    for job in jobs:
+        unique[job_id(job)] = job
+
+    jobs = list(unique.values())
+
+    print(f"Indeed Scrum Master jobs: {len(indeed_jobs)}")
+    print(f"LinkedIn Scrum Master jobs: {len(linkedin_jobs)}")
+    print(f"Unique relevant jobs: {len(jobs)}")
+
+    return jobs
+
+
+# ============================================================
+# STATE
+# ============================================================
 
 def load():
-    if not os.path.exists("seen.json"):
+    if not os.path.exists(SEEN_FILE):
         return {}
-    with open("seen.json", "r") as f:
-        return json.load(f)
+
+    try:
+        with open(
+            SEEN_FILE,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            data = json.load(file)
+
+        if isinstance(data, dict):
+            return data
+
+        return {}
+
+    except Exception as error:
+        print(f"Could not load {SEEN_FILE}: {error}")
+        return {}
+
 
 def save(data):
-    with open("seen.json", "w") as f:
-        json.dump(data, f)
+    """
+    Write state atomically.
 
-# ---------- EMAIL ----------
+    This prevents a partially-written JSON file if the
+    process is interrupted.
+    """
+
+    temporary_file = f"{SEEN_FILE}.tmp"
+
+    with open(
+        temporary_file,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            data,
+            file,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    os.replace(
+        temporary_file,
+        SEEN_FILE,
+    )
+
+
+# ============================================================
+# EMAIL
+# ============================================================
+
 def build_email(jobs):
     rows = ""
-    for j in jobs:
+
+    for job in jobs:
+        safe_title = html.escape(job["title"])
+        safe_company = html.escape(job["company"])
+        safe_location = html.escape(job["location"])
+        safe_source = html.escape(job["source"])
+        safe_link = html.escape(
+            job["link"],
+            quote=True,
+        )
+
         rows += f"""
         <tr>
-            <td>{html.escape(j['title'])}</td>
-            <td>{html.escape(j['company'])}</td>
-            <td>{html.escape(j['location'])}</td>
-            <td>{j['source']}</td>
-            <td><a href="{j['link']}">View</a></td>
+            <td>{safe_title}</td>
+            <td>{safe_company}</td>
+            <td>{safe_location}</td>
+            <td>{safe_source}</td>
+            <td>
+                <a href="{safe_link}">View Job</a>
+            </td>
         </tr>
         """
 
     return f"""
-    <h3>New QA / Scrum Jobs</h3>
-    <table border="1" cellpadding="6" cellspacing="0">
-        <tr>
-            <th>Title</th>
-            <th>Company</th>
-            <th>Location</th>
-            <th>Source</th>
-            <th>Link</th>
-        </tr>
-        {rows}
-    </table>
+    <html>
+    <body>
+        <h3>New Scrum Master Job Alerts</h3>
+
+        <table
+            border="1"
+            cellpadding="6"
+            cellspacing="0"
+        >
+            <tr>
+                <th>Title</th>
+                <th>Company</th>
+                <th>Location</th>
+                <th>Source</th>
+                <th>Link</th>
+            </tr>
+
+            {rows}
+
+        </table>
+    </body>
+    </html>
     """
+
 
 def send_email(jobs):
     if not jobs:
-        return
+        return True
+
+    email_user = os.environ.get("EMAIL_USER")
+    email_pass = os.environ.get("EMAIL_PASS")
+    email_to = os.environ.get("EMAIL_TO")
+
+    if not email_user or not email_pass or not email_to:
+        print("Email credentials are not configured.")
+        return False
 
     try:
-        msg = MIMEText(build_email(jobs), "html")
-        msg["Subject"] = "QA Job Alerts"
-        msg["From"] = os.environ.get("EMAIL_USER")
-        msg["To"] = os.environ.get("EMAIL_TO")
+        message = MIMEText(
+            build_email(jobs),
+            "html",
+        )
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-            s.login(os.environ.get("EMAIL_USER"), os.environ.get("EMAIL_PASS"))
-            s.send_message(msg)
+        message["Subject"] = "Scrum Master Job Alerts"
+        message["From"] = email_user
+        message["To"] = email_to
 
-    except Exception as e:
-        print("Email error:", e)
+        with smtplib.SMTP_SSL(
+            "smtp.gmail.com",
+            465,
+            timeout=20,
+        ) as server:
 
-# ---------- TELEGRAM ----------
+            server.login(
+                email_user,
+                email_pass,
+            )
+
+            server.send_message(message)
+
+        print("Email sent successfully.")
+        return True
+
+    except Exception as error:
+        print(f"Email error: {error}")
+        return False
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
 def send_telegram(jobs):
     if not jobs:
-        return
+        return True
 
     token = os.environ.get("TG_BOT_TOKEN")
     chat_id = os.environ.get("TG_CHAT_ID")
 
     if not token or not chat_id:
-        return
+        print("Telegram credentials are not configured.")
+        return False
 
     try:
-        message = "<b>New QA / Scrum Jobs</b>\n\n"
+        message = "<b>New Scrum Master Job Alerts</b>\n\n"
 
-        for j in jobs[:10]:
-            message += f"• <b>{html.escape(j['title'])}</b>\n"
-            message += f"{html.escape(j['company'])} | {html.escape(j['location'])}\n"
-            message += f"[{j['source']}] <a href='{j['link']}'>View</a>\n\n"
+        for job in jobs[:10]:
+            safe_title = html.escape(job["title"])
+            safe_company = html.escape(job["company"])
+            safe_location = html.escape(job["location"])
+            safe_source = html.escape(job["source"])
+            safe_link = html.escape(
+                job["link"],
+                quote=True,
+            )
 
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
+            message += (
+                f"• <b>{safe_title}</b>\n"
+                f"{safe_company} | {safe_location}\n"
+                f"[{safe_source}] "
+                f"<a href=\"{safe_link}\">View</a>\n\n"
+            )
 
-        requests.post(url, data={
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }, timeout=10)
+        url = (
+            f"https://api.telegram.org/"
+            f"bot{token}/sendMessage"
+        )
 
-    except Exception as e:
-        print("Telegram error:", e)
+        response = requests.post(
+            url,
+            data={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=20,
+        )
 
-# ---------- MAIN ----------
+        response.raise_for_status()
+
+        result = response.json()
+
+        if not result.get("ok"):
+            raise RuntimeError(
+                f"Telegram API error: {result}"
+            )
+
+        print("Telegram message sent successfully.")
+        return True
+
+    except Exception as error:
+        print(f"Telegram error: {error}")
+        return False
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
-    current = fetch_all()
+    current_jobs = fetch_all()
     previous = load()
 
     new_jobs = []
+
+    for job in current_jobs:
+        key = job_id(job)
+
+        if key not in previous:
+            new_jobs.append(job)
+
+    print(f"New Scrum Master jobs: {len(new_jobs)}")
+
+    if not new_jobs:
+        print("No new jobs.")
+        return
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Do NOT mark jobs as seen until notification succeeds.
+    #
+    # This means if Telegram/email fails, the same job will
+    # be retried on the next run instead of being permanently
+    # lost.
+    # --------------------------------------------------------
+
+    email_configured = all(
+        os.environ.get(name)
+        for name in [
+            "EMAIL_USER",
+            "EMAIL_PASS",
+            "EMAIL_TO",
+        ]
+    )
+
+    telegram_configured = all(
+        os.environ.get(name)
+        for name in [
+            "TG_BOT_TOKEN",
+            "TG_CHAT_ID",
+        ]
+    )
+
+    notification_results = []
+
+    if email_configured:
+        notification_results.append(
+            send_email(new_jobs)
+        )
+
+    if telegram_configured:
+        notification_results.append(
+            send_telegram(new_jobs)
+        )
+
+    # If no notification channel is configured, fail.
+    if not notification_results:
+        raise RuntimeError(
+            "No notification channel is configured."
+        )
+
+    # Every configured notification channel must succeed.
+    if not all(notification_results):
+        raise RuntimeError(
+            "One or more notifications failed. "
+            "Jobs will NOT be marked as seen."
+        )
+
+    # Only now mark jobs as seen.
     updated = previous.copy()
 
-    for j in current:
-        if not is_relevant(j):
-            continue
+    for job in new_jobs:
+        updated[job_id(job)] = {
+            "title": job["title"],
+            "company": job["company"],
+            "location": job["location"],
+            "link": job["link"],
+            "source": job["source"],
+        }
 
-        h = hash_job(j)
-
-        if h not in previous:
-            new_jobs.append(j)
-
-        updated[h] = j["link"]
-
-    print(f"New jobs found: {len(new_jobs)}")
-
-    send_email(new_jobs)
-    send_telegram(new_jobs)
     save(updated)
+
+    print(
+        f"Successfully saved {len(new_jobs)} new jobs."
+    )
+
 
 if __name__ == "__main__":
     main()
