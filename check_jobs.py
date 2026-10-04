@@ -212,26 +212,26 @@ def fetch_indeed():
 
     2. Scrum Master + Remote Canada
        Last 1 day
+
+    Uses Indeed's current search-result URL format rather than
+    relying exclusively on the /jobs endpoint.
     """
 
     search_urls = [
         (
             "Toronto",
             (
-                "https://ca.indeed.com/jobs"
-                "?q=%22Scrum+Master%22"
-                "&l=Toronto%2C+ON"
-                "&fromage=1"
+                "https://ca.indeed.com/"
+                "q-scrum-master-l-toronto%2C-on-jobs.html"
+                "?fromage=1"
             ),
         ),
         (
             "Remote Canada",
             (
-                "https://ca.indeed.com/jobs"
-                "?q=%22Scrum+Master%22"
-                "&l=Canada"
-                "&sc=0kf%3Aattr%28DSQF7%29%3B"
-                "&fromage=1"
+                "https://ca.indeed.com/"
+                "q-remote-scrum-master-l-canada-jobs.html"
+                "?fromage=1"
             ),
         ),
     ]
@@ -243,13 +243,34 @@ def fetch_indeed():
         print(
             f"Searching Indeed: {search_name}"
         )
+        print(
+            f"Indeed URL: {url}"
+        )
 
         try:
             response = requests.get(
                 url,
                 headers=HEADERS,
                 timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
             )
+
+            print(
+                f"Indeed {search_name} HTTP status: "
+                f"{response.status_code}"
+            )
+
+            print(
+                f"Indeed {search_name} final URL: "
+                f"{response.url}"
+            )
+
+            if response.status_code == 403:
+                print(
+                    f"Indeed {search_name} returned HTTP 403. "
+                    "Indeed is blocking this GitHub Actions request."
+                )
+                continue
 
             response.raise_for_status()
 
@@ -259,35 +280,59 @@ def fetch_indeed():
             )
 
             cards = soup.select(
-                "a.tapItem"
+                "a.tapItem, "
+                "div.job_seen_beacon, "
+                "div.cardOutline"
             )
 
             print(
                 f"Indeed {search_name} "
-                f"cards found: {len(cards)}"
+                f"candidate cards found: {len(cards)}"
             )
+
+            parsed_links = set()
 
             for card in cards:
 
                 try:
-                    title_el = card.select_one(
-                        "h2 span"
+                    title_el = (
+                        card.select_one("h2 span")
+                        or card.select_one("h2.jobTitle span")
+                        or card.select_one("h2.jobTitle")
                     )
 
-                    company_el = card.select_one(
-                        ".companyName"
+                    company_el = (
+                        card.select_one(".companyName")
+                        or card.select_one(
+                            "[data-testid='company-name']"
+                        )
                     )
 
-                    location_el = card.select_one(
-                        ".companyLocation"
+                    location_el = (
+                        card.select_one(".companyLocation")
+                        or card.select_one(
+                            "[data-testid='text-location']"
+                        )
                     )
 
-                    if not title_el:
+                    link_el = (
+                        card
+                        if card.name == "a"
+                        and card.get("href")
+                        else card.select_one(
+                            "a[href*='/viewjob']"
+                        )
+                    )
+
+                    if not link_el:
+                        link_el = card.select_one(
+                            "a[href*='/rc/clk']"
+                        )
+
+                    if not title_el or not link_el:
                         continue
 
-                    raw_link = card.get(
-                        "href"
-                    )
+                    raw_link = link_el.get("href")
 
                     if not raw_link:
                         continue
@@ -320,6 +365,11 @@ def fetch_indeed():
                         "https://ca.indeed.com",
                     )
 
+                    if link in parsed_links:
+                        continue
+
+                    parsed_links.add(link)
+
                     job = {
                         "title": title,
                         "company": company,
@@ -329,24 +379,97 @@ def fetch_indeed():
                     }
 
                     if is_relevant(job):
+                        print(
+                            f"Indeed relevant job: "
+                            f"{title} | {company} | {location}"
+                        )
                         jobs.append(job)
 
                 except Exception as error:
                     print(
-                        f"Indeed card error: {error}"
+                        f"Indeed {search_name} card error: "
+                        f"{error}"
                     )
                     continue
 
+            if not cards:
+                print(
+                    f"Indeed {search_name}: "
+                    "No recognized cards. Trying direct job links."
+                )
+
+                job_links = soup.select(
+                    "a[href*='/viewjob'], "
+                    "a[href*='/rc/clk']"
+                )
+
+                print(
+                    f"Indeed {search_name} direct job links: "
+                    f"{len(job_links)}"
+                )
+
+                for link_el in job_links:
+
+                    try:
+                        raw_link = link_el.get("href")
+
+                        if not raw_link:
+                            continue
+
+                        link = normalize_url(
+                            raw_link,
+                            "https://ca.indeed.com",
+                        )
+
+                        if link in parsed_links:
+                            continue
+
+                        title = link_el.get_text(
+                            " ",
+                            strip=True,
+                        )
+
+                        if not title:
+                            continue
+
+                        parsed_links.add(link)
+
+                        job = {
+                            "title": title,
+                            "company": "Unknown",
+                            "location": "Unknown",
+                            "link": link,
+                            "source": "Indeed",
+                        }
+
+                        if is_relevant(job):
+                            print(
+                                f"Indeed relevant job: {title}"
+                            )
+                            jobs.append(job)
+
+                    except Exception as error:
+                        print(
+                            f"Indeed {search_name} link error: "
+                            f"{error}"
+                        )
+                        continue
+
+            print(
+                f"Indeed {search_name} relevant jobs found: "
+                f"{sum(1 for job in jobs if job['source'] == 'Indeed')}"
+            )
+
         except requests.RequestException as error:
             print(
-                f"Indeed {search_name} "
-                f"request error: {error}"
+                f"Indeed {search_name} request error: "
+                f"{error}"
             )
 
         except Exception as error:
             print(
-                f"Indeed {search_name} "
-                f"error: {error}"
+                f"Indeed {search_name} error: "
+                f"{error}"
             )
 
     return jobs
