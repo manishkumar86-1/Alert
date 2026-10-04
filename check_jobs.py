@@ -22,6 +22,10 @@ HEADERS = {
 }
 
 
+# ----------------------------------------------------------------------
+# Location and role filters
+# ----------------------------------------------------------------------
+
 TORONTO_LOCATIONS = {
     "toronto",
     "mississauga",
@@ -57,6 +61,16 @@ REMOTE_CANADA_TERMS = {
 }
 
 
+ALLOWED_ROLES = {
+    "scrum master",
+    "quality analyst",
+    "software tester",
+    "manual tester",
+    "software developer",
+    "qa engineer",
+}
+
+
 # ----------------------------------------------------------------------
 # General helpers
 # ----------------------------------------------------------------------
@@ -68,11 +82,24 @@ def normalize_url(url):
 
     url = url.strip()
 
-    # Remove URL fragment.
     if "#" in url:
         url = url.split("#", 1)[0]
 
     return url
+
+
+def clean_text(value):
+    if not value:
+        return ""
+
+    return " ".join(value.split()).strip()
+
+
+def absolute_url(base_url, href):
+    if not href:
+        return ""
+
+    return normalize_url(urljoin(base_url, href))
 
 
 def load_seen():
@@ -116,9 +143,7 @@ def load_seen():
 
 
 def save_seen(seen):
-    """
-    Atomically save permanently seen job URLs.
-    """
+    """Atomically save permanently seen job URLs."""
     temp_file = f"{SEEN_FILE}.tmp"
 
     data = {
@@ -132,63 +157,37 @@ def save_seen(seen):
     os.replace(temp_file, SEEN_FILE)
 
 
-def clean_text(value):
-    if not value:
-        return ""
-
-    return " ".join(value.split()).strip()
-
-
-def absolute_url(base_url, href):
-    if not href:
-        return ""
-
-    return normalize_url(urljoin(base_url, href))
-
-
 # ----------------------------------------------------------------------
-# LinkedIn
+# LinkedIn filters
 # ----------------------------------------------------------------------
 
 def is_toronto_location(location):
-    """
-    Determine whether a LinkedIn location belongs to Toronto/GTA.
-    """
     location = clean_text(location).lower()
 
     if not location:
         return False
 
-    for term in TORONTO_LOCATIONS:
-        if term in location:
-            return True
-
-    return False
+    return any(
+        term in location
+        for term in TORONTO_LOCATIONS
+    )
 
 
 def is_remote_canada_location(location):
-    """
-    Determine whether a LinkedIn location represents a Canada-remote job.
-    """
     location = clean_text(location).lower()
 
     if not location:
         return False
 
-    for term in REMOTE_CANADA_TERMS:
-        if term in location:
-            return True
-
-    return False
+    return any(
+        term in location
+        for term in REMOTE_CANADA_TERMS
+    )
 
 
 def is_linkedin_location_match(location):
     """
-    TEST MODE:
-
-    LinkedIn title filtering is intentionally disabled.
-
-    A job matches if its location is:
+    LinkedIn job must be:
       - Toronto/GTA
       OR
       - Remote Canada
@@ -199,17 +198,32 @@ def is_linkedin_location_match(location):
     )
 
 
+def is_linkedin_role_match(title):
+    """
+    LinkedIn job title must contain one of the allowed role phrases.
+    """
+    title = clean_text(title).lower()
+
+    if not title:
+        return False
+
+    return any(
+        role in title
+        for role in ALLOWED_ROLES
+    )
+
+
+# ----------------------------------------------------------------------
+# LinkedIn
+# ----------------------------------------------------------------------
+
 def fetch_linkedin_jobs(search_url):
     """
     Fetch LinkedIn public job search results.
 
-    TEST MODE:
-      - No Scrum Master title filter.
-      - The search URL itself restricts results to the last hour.
-      - We only filter by Toronto/GTA or Remote Canada location.
+    The search URL restricts results to the last hour.
+    Python then applies role and location filtering.
     """
-    print(f"Checking LinkedIn: {search_url}")
-
     try:
         response = requests.get(
             search_url,
@@ -217,12 +231,10 @@ def fetch_linkedin_jobs(search_url):
             timeout=REQUEST_TIMEOUT,
         )
 
-        print(f"LinkedIn HTTP status: {response.status_code}")
-
         response.raise_for_status()
 
     except requests.RequestException as exc:
-        print(f"ERROR: LinkedIn request failed: {exc}")
+        print(f"LinkedIn request failed: {exc}")
         return []
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -289,6 +301,9 @@ def fetch_linkedin_jobs(search_url):
         if not title or not url:
             continue
 
+        if not is_linkedin_role_match(title):
+            continue
+
         if not is_linkedin_location_match(location):
             continue
 
@@ -302,8 +317,6 @@ def fetch_linkedin_jobs(search_url):
             }
         )
 
-    print(f"LinkedIn matching jobs: {len(jobs)}")
-
     return jobs
 
 
@@ -312,11 +325,7 @@ def fetch_linkedin_jobs(search_url):
 # ----------------------------------------------------------------------
 
 def is_indeed_scrum_master_job(title):
-    """
-    Keep Indeed behavior unchanged.
-
-    Indeed jobs must contain 'scrum master' in the title.
-    """
+    """Keep Indeed behavior unchanged."""
     return "scrum master" in clean_text(title).lower()
 
 
@@ -324,11 +333,9 @@ def fetch_indeed_jobs(search_url):
     """
     Fetch Indeed public search results.
 
-    Indeed currently may return HTTP 403 from GitHub Actions.
-    That is handled gracefully and results in zero jobs.
+    Indeed may return HTTP 403 from GitHub Actions.
+    This is handled gracefully.
     """
-    print(f"Checking Indeed: {search_url}")
-
     try:
         response = requests.get(
             search_url,
@@ -336,12 +343,10 @@ def fetch_indeed_jobs(search_url):
             timeout=REQUEST_TIMEOUT,
         )
 
-        print(f"Indeed HTTP status: {response.status_code}")
-
         response.raise_for_status()
 
     except requests.RequestException as exc:
-        print(f"ERROR: Indeed request failed: {exc}")
+        print(f"Indeed request failed: {exc}")
         return []
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -421,8 +426,6 @@ def fetch_indeed_jobs(search_url):
             }
         )
 
-    print(f"Indeed matching jobs: {len(jobs)}")
-
     return jobs
 
 
@@ -439,17 +442,15 @@ def telegram_configured():
 
 def send_telegram(job):
     """
-    Send one job notification to Telegram.
+    Send notification through Telegram.
 
-    Returns:
-      True  -> Telegram notification succeeded.
-      False -> Telegram notification failed.
+    Telegram is the primary notification channel.
     """
     token = os.getenv("TG_BOT_TOKEN")
     chat_id = os.getenv("TG_CHAT_ID")
 
     if not token or not chat_id:
-        print("ERROR: Telegram credentials are not configured.")
+        print("Telegram is not configured.")
         return False
 
     message = (
@@ -477,21 +478,16 @@ def send_telegram(job):
         )
 
         if response.ok:
-            print(
-                f"Telegram notification sent: "
-                f"{job['title']} | {job['url']}"
-            )
             return True
 
         print(
-            "ERROR: Telegram notification failed "
-            f"with HTTP {response.status_code}: "
-            f"{response.text[:500]}"
+            f"Telegram notification failed: "
+            f"HTTP {response.status_code}"
         )
         return False
 
     except requests.RequestException as exc:
-        print(f"ERROR: Telegram request failed: {exc}")
+        print(f"Telegram request failed: {exc}")
         return False
 
 
@@ -509,20 +505,16 @@ def email_configured():
 
 def send_email(job):
     """
-    Send one job notification through Gmail SMTP.
+    Send optional Gmail notification.
 
-    Gmail is optional.
-
-    Returns:
-      True  -> email succeeded.
-      False -> email failed.
+    Gmail failure does NOT prevent the job from being marked as seen
+    when Telegram succeeds.
     """
     email_user = os.getenv("EMAIL_USER")
     email_pass = os.getenv("EMAIL_PASS")
     email_to = os.getenv("EMAIL_TO")
 
     if not email_user or not email_pass or not email_to:
-        print("Gmail is not configured.")
         return False
 
     msg = EmailMessage()
@@ -554,15 +546,10 @@ def send_email(job):
             server.login(email_user, email_pass)
             server.send_message(msg)
 
-        print(
-            f"Gmail notification sent: "
-            f"{job['title']} | {job['url']}"
-        )
-
         return True
 
     except Exception as exc:
-        print(f"ERROR: Gmail notification failed: {exc}")
+        print(f"Gmail notification failed: {exc}")
         return False
 
 
@@ -575,56 +562,30 @@ def notify(job):
     Telegram is the primary notification channel.
 
     Rules:
-      - Telegram success = job is successfully alerted.
-      - Gmail is optional and does not determine whether the
-        job is marked as seen.
-      - If Gmail fails but Telegram succeeds, the job is still
-        considered successful and will be marked as seen.
-      - If Telegram fails, the job remains unseen.
+      Telegram success + Gmail success -> seen
+      Telegram success + Gmail failure -> seen
+      Telegram success + Gmail absent  -> seen
+      Telegram failure + Gmail success -> NOT seen
+      Telegram failure + Gmail failure -> NOT seen
     """
 
-    telegram_ok = False
-
-    # Telegram is required.
-    if telegram_configured():
-        telegram_ok = send_telegram(job)
-    else:
-        print("ERROR: Telegram is not configured.")
+    if not telegram_configured():
+        print("Telegram is not configured.")
         return False
 
-    # Gmail is optional.
+    telegram_ok = send_telegram(job)
+
+    if not telegram_ok:
+        return False
+
     if email_configured():
-        email_ok = send_email(job)
-
-        if not email_ok:
+        if not send_email(job):
             print(
-                "WARNING: Gmail notification failed, "
-                "but Telegram succeeded. "
-                "Job will still be marked as seen."
+                "Gmail notification failed, "
+                "but Telegram succeeded."
             )
-        else:
-            print("Gmail notification succeeded.")
 
-    else:
-        print(
-            "Gmail is not configured. "
-            "Telegram notification is sufficient."
-        )
-
-    # Telegram determines whether the job is successfully alerted.
-    if telegram_ok:
-        print(
-            "Telegram notification succeeded. "
-            "Job will be marked as seen."
-        )
-        return True
-
-    print(
-        "Telegram notification failed. "
-        "Job will NOT be marked as seen."
-    )
-
-    return False
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -632,24 +593,13 @@ def notify(job):
 # ----------------------------------------------------------------------
 
 def main():
-    print("Starting Scrum Master Job Alerts...")
-    print()
-
     seen = load_seen()
 
-    print(f"Previously seen jobs: {len(seen)}")
-    print()
-
-    # --------------------------------------------------------------
-    # LinkedIn TEST MODE
+    # LinkedIn:
+    # Toronto/GTA, last 1 hour
+    # Remote Canada, last 1 hour
     #
-    # IMPORTANT:
-    # No title/role filter yet.
-    #
-    # These URLs only restrict results to jobs posted in the
-    # last hour.
-    # --------------------------------------------------------------
-
+    # Role filtering is performed locally.
     linkedin_urls = [
         (
             "https://www.linkedin.com/jobs/search/"
@@ -664,15 +614,12 @@ def main():
     linkedin_jobs = []
 
     for url in linkedin_urls:
-        jobs = fetch_linkedin_jobs(url)
-        linkedin_jobs.extend(jobs)
+        linkedin_jobs.extend(
+            fetch_linkedin_jobs(url)
+        )
 
-    # --------------------------------------------------------------
-    # Indeed
-    #
+    # Indeed:
     # Keep existing Scrum Master searches unchanged.
-    # --------------------------------------------------------------
-
     indeed_urls = [
         (
             "https://ca.indeed.com/jobs"
@@ -692,13 +639,11 @@ def main():
     indeed_jobs = []
 
     for url in indeed_urls:
-        jobs = fetch_indeed_jobs(url)
-        indeed_jobs.extend(jobs)
+        indeed_jobs.extend(
+            fetch_indeed_jobs(url)
+        )
 
-    # --------------------------------------------------------------
-    # Combine and deduplicate
-    # --------------------------------------------------------------
-
+    # Combine and deduplicate by normalized URL.
     all_jobs = linkedin_jobs + indeed_jobs
 
     unique_jobs = {}
@@ -714,84 +659,41 @@ def main():
 
     jobs = list(unique_jobs.values())
 
-    print()
-    print(f"Total unique matching jobs: {len(jobs)}")
-
-    # --------------------------------------------------------------
-    # Remove permanently seen jobs
-    # --------------------------------------------------------------
-
+    # Only process jobs that have never been successfully alerted.
     new_jobs = [
         job
         for job in jobs
         if normalize_url(job["url"]) not in seen
     ]
 
-    print(f"New jobs: {len(new_jobs)}")
-    print()
-
     if not new_jobs:
-        print("No new jobs found.")
+        print("No new matching jobs.")
         return
-
-    # --------------------------------------------------------------
-    # Notify
-    #
-    # IMPORTANT:
-    # A job is added to seen ONLY when notify() returns True.
-    #
-    # Since Telegram is the primary channel:
-    #
-    # Telegram success + Gmail success -> seen
-    # Telegram success + Gmail failure  -> seen
-    # Telegram failure + Gmail success  -> NOT seen
-    # Telegram failure + Gmail failure  -> NOT seen
-    # --------------------------------------------------------------
 
     newly_seen = set()
 
-    for index, job in enumerate(new_jobs, start=1):
-        print(
-            f"[{index}/{len(new_jobs)}] "
-            f"Processing: {job['title']} | "
-            f"{job['company'] or 'N/A'} | "
-            f"{job['location'] or 'N/A'}"
-        )
-
+    for job in new_jobs:
         try:
-            success = notify(job)
+            if notify(job):
+                newly_seen.add(
+                    normalize_url(job["url"])
+                )
 
         except Exception as exc:
             print(
-                f"ERROR: Unexpected notification error: {exc}"
-            )
-            success = False
-
-        if success:
-            newly_seen.add(
-                normalize_url(job["url"])
+                f"Notification error for "
+                f"{job['title']}: {exc}"
             )
 
-        print()
-
-        # Small delay to avoid hammering notification APIs.
         time.sleep(0.5)
 
-    # --------------------------------------------------------------
-    # Persist state
-    #
-    # Only successfully alerted jobs are added.
-    # --------------------------------------------------------------
-
+    # Only successfully alerted jobs are permanently recorded.
     if newly_seen:
         seen.update(newly_seen)
         save_seen(seen)
 
         print(
             f"Marked {len(newly_seen)} job(s) as seen."
-        )
-        print(
-            f"Total permanently seen jobs: {len(seen)}"
         )
     else:
         print(
