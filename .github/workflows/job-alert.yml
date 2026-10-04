@@ -70,6 +70,104 @@ jobs:
 
               except Exception as e:
                   print("ERROR:", repr(e))
+          PY
+
+      - name: Inspect LinkedIn job page
+        run: |
+          python - <<'PY'
+          import requests
+          from bs4 import BeautifulSoup
+
+          url = (
+              "https://www.linkedin.com/jobs/search/"
+              "?keywords=Scrum%20Master"
+              "&location=Toronto"
+              "&f_TPR=r3600"
+          )
+
+          headers = {
+              "User-Agent": (
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/154.0.0.0 Safari/537.36"
+              ),
+              "Accept-Language": "en-US,en;q=0.9",
+          }
+
+          response = requests.get(
+              url,
+              headers=headers,
+              timeout=(10, 20),
+              allow_redirects=True,
+          )
+
+          print("Status:", response.status_code)
+          print("Final URL:", response.url)
+          print("Response length:", len(response.text))
+
+          soup = BeautifulSoup(
+              response.text,
+              "html.parser",
+          )
+
+          print("\n--- LinkedIn selectors ---")
+
+          selectors = [
+              "li",
+              "li.base-card",
+              "h3",
+              "h4",
+              ".job-search-card__location",
+              "a.base-card__full-link",
+              "a[href*='/jobs/view/']",
+          ]
+
+          for selector in selectors:
+              elements = soup.select(selector)
+
+              print(
+                  f"{selector}: {len(elements)} found"
+              )
+
+          print("\n--- First 10 h3 titles ---")
+
+          for element in soup.select("h3")[:10]:
+              print(
+                  repr(
+                      element.get_text(
+                          " ",
+                          strip=True,
+                      )
+                  )
+              )
+
+          print("\n--- First 10 job links ---")
+
+          links = soup.select(
+              "a[href*='/jobs/view/']"
+          )
+
+          for link in links[:10]:
+              print(
+                  link.get("href")
+              )
+
+          print("\n--- First 10 locations ---")
+
+          locations = soup.select(
+              ".job-search-card__location"
+          )
+
+          for location in locations[:10]:
+              print(
+                  repr(
+                      location.get_text(
+                          " ",
+                          strip=True,
+                      )
+                  )
+              )
+          PY
 
       - name: Check Scrum Master jobs
         env:
