@@ -4,7 +4,12 @@ import os
 import re
 import smtplib
 from email.mime.text import MIMEText
-from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
+from urllib.parse import (
+    parse_qs,
+    unquote,
+    urljoin,
+    urlparse,
+)
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,6 +18,9 @@ from bs4 import BeautifulSoup
 SEEN_FILE = "seen.json"
 REQUEST_TIMEOUT = 20
 
+GOOGLE_SEARCH_URL = "https://www.google.com/search"
+GOOGLE_SEARCH_RESULTS = 20
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -20,6 +28,11 @@ HEADERS = {
         "Chrome/131.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,image/avif,image/webp,"
+        "*/*;q=0.8"
+    ),
 }
 
 
@@ -68,17 +81,11 @@ def is_relevant(job):
     if not title:
         return False
 
-    # --------------------------------------------------------
-    # ONLY Scrum Master roles
-    # --------------------------------------------------------
-
+    # ONLY Scrum Master roles.
     if "scrum master" not in title:
         return False
 
-    # --------------------------------------------------------
-    # Reject obvious training/certification results
-    # --------------------------------------------------------
-
+    # Reject obvious training/certification results.
     excluded_title_words = [
         "course",
         "bootcamp",
@@ -93,28 +100,13 @@ def is_relevant(job):
     ):
         return False
 
-    # --------------------------------------------------------
-    # Toronto / GTA
-    # --------------------------------------------------------
-
+    # Toronto / GTA.
     toronto_match = any(
         location_name in location
         for location_name in TORONTO_LOCATIONS
     )
 
-    # --------------------------------------------------------
-    # Remote Canada
-    #
-    # Different job sites can display remote locations as:
-    #
-    # Remote, Canada
-    # Remote - Canada
-    # Canada - Remote
-    # Anywhere in Canada
-    # Canada (Remote)
-    # Nationwide
-    # --------------------------------------------------------
-
+    # Remote Canada.
     remote_canada_match = (
         "remote" in location
         and (
@@ -163,8 +155,7 @@ def job_id(job):
     """
     Use the actual posting URL as the primary identifier.
 
-    This allows the bot to permanently remember jobs it
-    has already shown.
+    seen.json has no expiration.
 
     If a source does not provide a URL, fall back to:
         title + company + location
@@ -201,92 +192,168 @@ def job_id(job):
 
 
 # ============================================================
-# INDEED VIA GOOGLE SEARCH
+# GOOGLE / INDEED URL HELPERS
 # ============================================================
-
-GOOGLE_SEARCH_URL = "https://www.google.com/search"
-GOOGLE_SEARCH_RESULTS = 20
-
 
 def extract_google_result_url(raw_href):
     """
-    Convert a Google result link into the underlying Indeed URL.
+    Convert a Google result link into the underlying URL.
 
-    Google can return either:
+    Google can return:
+
         https://ca.indeed.com/viewjob?jk=...
-    or a Google redirect such as:
+
+    or:
+
         /url?q=https://ca.indeed.com/viewjob?jk=...
+
+    or:
+
+        https://www.google.com/url?url=...
     """
 
     if not raw_href:
         return ""
 
-    href = html.unescape(raw_href.strip())
+    href = html.unescape(
+        raw_href.strip()
+    )
+
+    if not href:
+        return ""
 
     if href.startswith("//"):
         href = "https:" + href
 
+    # Relative Google redirect.
+    if href.startswith("/url?"):
+        parsed = urlparse(href)
+        query = parse_qs(parsed.query)
+
+        for key in ("q", "url"):
+            values = query.get(key)
+
+            if values:
+                return unquote(values[0])
+
+        return href
+
     parsed = urlparse(href)
 
-    # Google redirect URL.
-    if parsed.netloc.endswith("google.com") or parsed.netloc.endswith(
-        "google.ca"
+    # Absolute Google redirect.
+    if (
+        parsed.netloc.lower().endswith("google.com")
+        or parsed.netloc.lower().endswith("google.ca")
     ):
         query = parse_qs(parsed.query)
 
         for key in ("q", "url"):
             values = query.get(key)
-            if values:
-                href = unquote(values[0])
-                break
 
-    # Relative Google redirect URL.
-    elif href.startswith("/url?"):
-        query = parse_qs(parsed.query)
-
-        for key in ("q", "url"):
-            values = query.get(key)
             if values:
-                href = unquote(values[0])
-                break
+                return unquote(values[0])
 
     return href
 
 
-def is_indeed_job_url(url):
+def is_indeed_domain_url(url):
     """
-    Accept actual Indeed job pages, not Indeed search/category pages.
+    Return True for any Indeed URL.
+
+    This is intentionally broader than is_indeed_job_url()
+    because it is used for diagnostics.
     """
 
     if not url:
         return False
 
     parsed = urlparse(url)
-    host = parsed.netloc.lower()
+
+    host = parsed.netloc.lower().split(":", 1)[0]
+
+    return host.endswith("indeed.com")
+
+
+def is_indeed_job_url(url):
+    """
+    Accept common Indeed job URL formats.
+
+    Examples:
+
+        /viewjob?jk=...
+        /rc/clk?jk=...
+        /pagead/clk?jk=...
+    """
+
+    if not url:
+        return False
+
+    parsed = urlparse(url)
+
+    host = parsed.netloc.lower().split(":", 1)[0]
 
     if not host.endswith("indeed.com"):
         return False
 
     path = parsed.path.lower()
+    query = parsed.query.lower()
 
-    return (
-        "/viewjob" in path
-        or "/pagead/" in path
+    if "/viewjob" in path:
+        return True
+
+    if "/rc/clk" in path and "jk=" in query:
+        return True
+
+    if "/pagead/" in path and "jk=" in query:
+        return True
+
+    return False
+
+
+def normalize_indeed_job_url(url):
+    """
+    Normalize an Indeed URL.
+
+    For standard viewjob URLs, keep the URL.
+
+    For /rc/clk or /pagead URLs, retain the URL because
+    it may be the only job URL Google exposes.
+    """
+
+    if not url:
+        return ""
+
+    url = html.unescape(
+        url.strip()
     )
 
+    parsed = urlparse(url)
 
+    # Remove Google/Indeed fragments.
+    parsed = parsed._replace(
+        fragment=""
+    )
+
+    return parsed.geturl()
+
+
+# ============================================================
+# INDEED TITLE / LOCATION / COMPANY
+# ============================================================
 
 def clean_indeed_title(title):
     """
-    Remove Google's Indeed page-title suffix so the alert shows
-    the actual job title instead of the search-engine page title.
+    Clean Google's title for an Indeed result.
     """
 
     title = " ".join(
         title.split()
     ).strip()
 
-    # Remove the standard Indeed suffix.
+    if not title:
+        return ""
+
+    # Remove standard Indeed suffix.
     title = re.sub(
         r"\s+-\s+Indeed(?:\.com)?$",
         "",
@@ -294,12 +361,12 @@ def clean_indeed_title(title):
         flags=re.IGNORECASE,
     )
 
-    # Remove common location suffixes that Google includes in
-    # the page title. Keep the actual role title intact.
+    # Remove common location suffixes.
     location_suffix = (
-        r"(?:Toronto|North York|Scarborough|Etobicoke|Markham|"
-        r"Richmond Hill|Vaughan|Thornhill|Mississauga|Brampton|"
-        r"Oakville|Ajax|Pickering|Whitby|Oshawa|Greater Toronto Area)"
+        r"(?:Toronto|North York|Scarborough|Etobicoke|"
+        r"Markham|Richmond Hill|Vaughan|Thornhill|"
+        r"Mississauga|Brampton|Oakville|Ajax|"
+        r"Pickering|Whitby|Oshawa|Greater Toronto Area)"
         r"(?:,\s*ON)?"
     )
 
@@ -322,43 +389,91 @@ def clean_indeed_title(title):
 
 def extract_indeed_location(text):
     """
-    Infer a location from the Google result title/snippet.
+    Infer the location from Google's actual result content.
 
-    We deliberately require the location to appear in the actual
-    Google result content; the search query itself is not counted.
+    The search query itself is NOT used as evidence for location.
     """
 
     normalized = " ".join(
         text.lower().split()
     )
 
-    # More specific GTA phrases first.
     location_patterns = [
-        ("greater toronto area", "Greater Toronto Area, ON"),
-        ("north york", "North York, ON"),
-        ("scarborough", "Scarborough, ON"),
-        ("etobicoke", "Etobicoke, ON"),
-        ("markham", "Markham, ON"),
-        ("richmond hill", "Richmond Hill, ON"),
-        ("vaughan", "Vaughan, ON"),
-        ("thornhill", "Thornhill, ON"),
-        ("mississauga", "Mississauga, ON"),
-        ("brampton", "Brampton, ON"),
-        ("oakville", "Oakville, ON"),
-        ("ajax", "Ajax, ON"),
-        ("pickering", "Pickering, ON"),
-        ("whitby", "Whitby, ON"),
-        ("oshawa", "Oshawa, ON"),
-        ("toronto", "Toronto, ON"),
-        ("gta", "GTA"),
+        (
+            "greater toronto area",
+            "Greater Toronto Area, ON",
+        ),
+        (
+            "north york",
+            "North York, ON",
+        ),
+        (
+            "scarborough",
+            "Scarborough, ON",
+        ),
+        (
+            "etobicoke",
+            "Etobicoke, ON",
+        ),
+        (
+            "markham",
+            "Markham, ON",
+        ),
+        (
+            "richmond hill",
+            "Richmond Hill, ON",
+        ),
+        (
+            "vaughan",
+            "Vaughan, ON",
+        ),
+        (
+            "thornhill",
+            "Thornhill, ON",
+        ),
+        (
+            "mississauga",
+            "Mississauga, ON",
+        ),
+        (
+            "brampton",
+            "Brampton, ON",
+        ),
+        (
+            "oakville",
+            "Oakville, ON",
+        ),
+        (
+            "ajax",
+            "Ajax, ON",
+        ),
+        (
+            "pickering",
+            "Pickering, ON",
+        ),
+        (
+            "whitby",
+            "Whitby, ON",
+        ),
+        (
+            "oshawa",
+            "Oshawa, ON",
+        ),
+        (
+            "toronto",
+            "Toronto, ON",
+        ),
+        (
+            "gta",
+            "GTA",
+        ),
     ]
 
     for needle, location in location_patterns:
         if needle in normalized:
             return location
 
-    # Remote Canada variations.
-    remote_canada_patterns = [
+    remote_patterns = [
         "remote canada",
         "canada remote",
         "remote - canada",
@@ -371,12 +486,14 @@ def extract_indeed_location(text):
 
     if any(
         pattern in normalized
-        for pattern in remote_canada_patterns
+        for pattern in remote_patterns
     ):
         return "Remote, Canada"
 
-    # A result can show "Remote" and "Canada" separately.
-    if "remote" in normalized and "canada" in normalized:
+    if (
+        "remote" in normalized
+        and "canada" in normalized
+    ):
         return "Remote, Canada"
 
     return ""
@@ -384,11 +501,10 @@ def extract_indeed_location(text):
 
 def extract_indeed_company(snippet):
     """
-    Google snippets for Indeed often start with the employer name,
-    followed by a rating and/or location. Extract that when possible.
+    Best-effort company extraction from Google's snippet.
 
-    Company extraction is best-effort because we are intentionally
-    not opening Indeed pages after discovery.
+    We do not open Indeed because direct Indeed requests from
+    GitHub Actions were returning HTTP 403.
     """
 
     if not snippet:
@@ -398,25 +514,37 @@ def extract_indeed_company(snippet):
         snippet.split()
     ).strip()
 
-    # Common Indeed pattern:
+    # Common pattern:
+    #
     # Company Name 4.2 4.2 out of 5 stars ...
+    #
     match = re.match(
         r"^(.{2,100}?)\s+"
-        r"\d(?:\.\d)?(?:\s+\d(?:\.\d)?)?"
+        r"\d(?:\.\d)?"
+        r"(?:\s+\d(?:\.\d)?)?"
         r"(?:\s+out of 5 stars?)?",
         text,
         flags=re.IGNORECASE,
     )
 
     if match:
-        company = match.group(1).strip(" -|·")
+        company = match.group(
+            1
+        ).strip(
+            " -|·"
+        )
+
         if company:
             return company
 
     # Another common pattern:
+    #
     # Company Name · 4.2 · Toronto, ON
+    #
     parts = [
-        part.strip(" -|")
+        part.strip(
+            " -|"
+        )
         for part in re.split(
             r"\s+[·•]\s+",
             text,
@@ -428,29 +556,257 @@ def extract_indeed_company(snippet):
         first = parts[0]
 
         if (
-            first.lower() not in {"indeed", "indeed.com"}
+            first.lower()
+            not in {
+                "indeed",
+                "indeed.com",
+            }
             and len(first) <= 100
-            and not re.search(r"\bremote\b|\bcanada\b", first, re.I)
+            and not re.search(
+                r"\bremote\b|\bcanada\b",
+                first,
+                re.IGNORECASE,
+            )
         ):
             return first
 
     return "Unknown"
 
 
-def fetch_google_indeed(search_name, query):
+# ============================================================
+# GOOGLE DIAGNOSTICS
+# ============================================================
+
+def print_google_diagnostics(
+    search_name,
+    query,
+    response,
+    soup,
+):
     """
-    Search Google for Indeed job pages.
+    Print enough information to diagnose what Google actually
+    returned to GitHub Actions.
 
-    Google is used only as a discovery mechanism. We do not call
-    an API and we do not request the Indeed search page, which was
-    returning HTTP 403 from GitHub Actions.
-
-    The qdr:d parameter asks Google for results from the past day.
-    We still apply our own title/location filters afterward.
+    This is intentionally verbose while we stabilize the
+    Google -> Indeed discovery.
     """
 
     print(
-        f"Searching Indeed through Google: {search_name}"
+        ""
+    )
+
+    print(
+        "---------------- GOOGLE DIAGNOSTICS ----------------"
+    )
+
+    print(
+        f"Google {search_name} query:"
+    )
+
+    print(
+        f"  {query}"
+    )
+
+    print(
+        f"Google {search_name} HTTP status:"
+        f" {response.status_code}"
+    )
+
+    print(
+        f"Google {search_name} final URL:"
+        f" {response.url}"
+    )
+
+    print(
+        f"Google {search_name} response bytes:"
+        f" {len(response.content)}"
+    )
+
+    page_title = ""
+
+    if soup.title:
+        page_title = soup.title.get_text(
+            " ",
+            strip=True,
+        )
+
+    print(
+        f"Google {search_name} page title:"
+        f" {page_title}"
+    )
+
+    body_text = soup.get_text(
+        " ",
+        strip=True,
+    )
+
+    body_lower = body_text.lower()
+
+    print(
+        f"Google {search_name} raw 'indeed.com' count:"
+        f" {body_lower.count('indeed.com')}"
+    )
+
+    print(
+        f"Google {search_name} raw '/viewjob' count:"
+        f" {body_lower.count('/viewjob')}"
+    )
+
+    print(
+        f"Google {search_name} raw 'Scrum Master' count:"
+        f" {body_lower.count('scrum master')}"
+    )
+
+    if (
+        "consent.google.com" in response.url
+        or "before you continue" in body_lower
+        or "unusual traffic" in body_lower
+        or "captcha" in body_lower
+    ):
+        print(
+            f"Google {search_name} WARNING:"
+            " response may be a consent/challenge page."
+        )
+
+    indeed_anchors = []
+
+    for anchor in soup.select(
+        "a[href]"
+    ):
+        raw_href = anchor.get(
+            "href",
+            "",
+        )
+
+        extracted = extract_google_result_url(
+            raw_href
+        )
+
+        if is_indeed_domain_url(
+            extracted
+        ):
+            text = anchor.get_text(
+                " ",
+                strip=True,
+            )
+
+            indeed_anchors.append(
+                {
+                    "text": text,
+                    "href": extracted,
+                }
+            )
+
+    print(
+        f"Google {search_name} Indeed-domain anchors:"
+        f" {len(indeed_anchors)}"
+    )
+
+    if indeed_anchors:
+        print(
+            f"Google {search_name} Indeed anchor samples:"
+        )
+
+        for item in indeed_anchors[:10]:
+            print(
+                "  TEXT: "
+                f"{item['text'][:160]}"
+            )
+
+            print(
+                "  URL:  "
+                f"{item['href'][:500]}"
+            )
+    else:
+        print(
+            f"Google {search_name}:"
+            " no Indeed-domain anchors were found."
+        )
+
+        # Show a few Google result anchors so we can see what
+        # Google is actually returning.
+        print(
+            f"Google {search_name} non-Indeed anchor samples:"
+        )
+
+        shown = 0
+
+        for anchor in soup.select(
+            "a[href]"
+        ):
+            raw_href = anchor.get(
+                "href",
+                "",
+            )
+
+            if not raw_href:
+                continue
+
+            extracted = extract_google_result_url(
+                raw_href
+            )
+
+            text = anchor.get_text(
+                " ",
+                strip=True,
+            )
+
+            if not text:
+                continue
+
+            if (
+                "google.com" in extracted.lower()
+                and "/search" in extracted.lower()
+            ):
+                continue
+
+            print(
+                "  TEXT: "
+                f"{text[:160]}"
+            )
+
+            print(
+                "  URL:  "
+                f"{extracted[:500]}"
+            )
+
+            shown += 1
+
+            if shown >= 10:
+                break
+
+    print(
+        "----------------------------------------------------"
+    )
+
+    print(
+        ""
+    )
+
+
+# ============================================================
+# GOOGLE -> INDEED
+# ============================================================
+
+def fetch_google_indeed(
+    search_name,
+    query,
+):
+    """
+    Search Google for Indeed job pages.
+
+    Google is used only as a free discovery mechanism.
+
+    No Indeed API is used.
+
+    No paid search API is used.
+
+    Google's qdr:d filter asks for approximately the past day.
+    """
+
+    print(
+        f"Searching Indeed through Google: "
+        f"{search_name}"
     )
 
     params = {
@@ -460,6 +816,7 @@ def fetch_google_indeed(search_name, query):
         "num": GOOGLE_SEARCH_RESULTS,
         "filter": "0",
         "tbs": "qdr:d",
+        "gbv": "1",
     }
 
     try:
@@ -468,6 +825,7 @@ def fetch_google_indeed(search_name, query):
             params=params,
             headers=HEADERS,
             timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
         )
 
         response.raise_for_status()
@@ -477,76 +835,38 @@ def fetch_google_indeed(search_name, query):
             "html.parser",
         )
 
-        # Google result blocks normally use MjjYud. The fallback
-        # scans anchors containing actual Indeed job URLs.
+        # ----------------------------------------------------
+        # IMPORTANT DIAGNOSTIC OUTPUT
+        # ----------------------------------------------------
+
+        print_google_diagnostics(
+            search_name,
+            query,
+            response,
+            soup,
+        )
+
+        # ----------------------------------------------------
+        # Extract Google results.
+        #
+        # Do not depend on one Google CSS class because Google
+        # frequently changes its markup.
+        # ----------------------------------------------------
+
+        results = []
+
+        # First try standard Google result blocks.
         result_blocks = soup.select(
             "div.MjjYud"
         )
 
-        results = []
-
-        if result_blocks:
-            for block in result_blocks:
-
-                link_el = block.select_one(
-                    "a[href]"
-                )
-
-                title_el = block.select_one(
-                    "h3"
-                )
-
-                snippet_el = block.select_one(
-                    ".VwiC3b, .yXK7lf, div[data-sncf]"
-                )
-
-                if not link_el:
-                    continue
-
-                raw_href = link_el.get("href", "")
-                link = extract_google_result_url(
-                    raw_href
-                )
-
-                if not is_indeed_job_url(link):
-                    continue
-
-                title = (
-                    title_el.get_text(
-                        " ",
-                        strip=True,
-                    )
-                    if title_el
-                    else ""
-                )
-
-                snippet = (
-                    snippet_el.get_text(
-                        " ",
-                        strip=True,
-                    )
-                    if snippet_el
-                    else block.get_text(
-                        " ",
-                        strip=True,
-                    )
-                )
-
-                results.append(
-                    {
-                        "title": title,
-                        "snippet": snippet,
-                        "link": link,
-                    }
-                )
-
-        # Fallback for Google markup changes.
-        if not results:
-            for link_el in soup.select(
+        for block in result_blocks:
+            anchors = block.select(
                 "a[href]"
-            ):
+            )
 
-                raw_href = link_el.get(
+            for anchor in anchors:
+                raw_href = anchor.get(
                     "href",
                     "",
                 )
@@ -555,34 +875,53 @@ def fetch_google_indeed(search_name, query):
                     raw_href
                 )
 
-                if not is_indeed_job_url(link):
+                if not is_indeed_job_url(
+                    link
+                ):
                     continue
 
-                title_el = link_el.select_one(
+                title_el = block.select_one(
                     "h3"
                 )
 
-                title = (
-                    title_el.get_text(
+                title = ""
+
+                if title_el:
+                    title = title_el.get_text(
                         " ",
                         strip=True,
                     )
-                    if title_el
-                    else link_el.get_text(
+
+                if not title:
+                    title = anchor.get_text(
                         " ",
                         strip=True,
                     )
+
+                snippet_el = block.select_one(
+                    ".VwiC3b"
                 )
 
-                parent = link_el.parent
-                snippet = (
-                    parent.get_text(
+                if not snippet_el:
+                    snippet_el = block.select_one(
+                        ".yXK7lf"
+                    )
+
+                if not snippet_el:
+                    snippet_el = block.select_one(
+                        "div[data-sncf]"
+                    )
+
+                if snippet_el:
+                    snippet = snippet_el.get_text(
                         " ",
                         strip=True,
                     )
-                    if parent
-                    else ""
-                )
+                else:
+                    snippet = block.get_text(
+                        " ",
+                        strip=True,
+                    )
 
                 results.append(
                     {
@@ -592,11 +931,131 @@ def fetch_google_indeed(search_name, query):
                     }
                 )
 
-        # Deduplicate Google results before filtering.
+        # ----------------------------------------------------
+        # Second pass:
+        #
+        # Scan every anchor. This is the important fallback
+        # for Google markup changes.
+        # ----------------------------------------------------
+
+        if not results:
+            for anchor in soup.select(
+                "a[href]"
+            ):
+                raw_href = anchor.get(
+                    "href",
+                    "",
+                )
+
+                link = extract_google_result_url(
+                    raw_href
+                )
+
+                if not is_indeed_job_url(
+                    link
+                ):
+                    continue
+
+                title_el = anchor.select_one(
+                    "h3"
+                )
+
+                if title_el:
+                    title = title_el.get_text(
+                        " ",
+                        strip=True,
+                    )
+                else:
+                    title = anchor.get_text(
+                        " ",
+                        strip=True,
+                    )
+
+                # Look around the anchor for useful snippet text.
+                parent = anchor.parent
+
+                if parent:
+                    snippet = parent.get_text(
+                        " ",
+                        strip=True,
+                    )
+                else:
+                    snippet = ""
+
+                results.append(
+                    {
+                        "title": title,
+                        "snippet": snippet,
+                        "link": link,
+                    }
+                )
+
+        # ----------------------------------------------------
+        # Third pass:
+        #
+        # Some Google responses expose an Indeed URL in an
+        # ancestor while the clickable anchor is elsewhere.
+        # Scan the raw HTML for Indeed URLs.
+        # ----------------------------------------------------
+
+        if not results:
+            raw_html = response.text
+
+            patterns = [
+                r'https?://(?:[a-z]{2,3}\.)?indeed\.com/viewjob\?[^"\'>\s]+',
+                r'https?://(?:[a-z]{2,3}\.)?indeed\.com/rc/clk\?[^"\'>\s]+',
+                r'https?://(?:[a-z]{2,3}\.)?indeed\.com/pagead/[^"\'>\s]+',
+            ]
+
+            raw_links = []
+
+            for pattern in patterns:
+                raw_links.extend(
+                    re.findall(
+                        pattern,
+                        raw_html,
+                        flags=re.IGNORECASE,
+                    )
+                )
+
+            for raw_link in raw_links:
+                link = html.unescape(
+                    raw_link
+                )
+
+                link = unquote(
+                    link
+                )
+
+                if not is_indeed_job_url(
+                    link
+                ):
+                    continue
+
+                results.append(
+                    {
+                        "title": "",
+                        "snippet": "",
+                        "link": link,
+                    }
+                )
+
+        # ----------------------------------------------------
+        # Deduplicate Google results.
+        # ----------------------------------------------------
+
         unique_results = {}
 
         for result in results:
-            unique_results[result["link"]] = result
+            link = result.get(
+                "link",
+                "",
+            )
+
+            if link:
+                unique_results[
+                    normalize_indeed_job_url(link)
+                ] = result
 
         results = list(
             unique_results.values()
@@ -608,14 +1067,53 @@ def fetch_google_indeed(search_name, query):
             f"{len(results)}"
         )
 
+        # ----------------------------------------------------
+        # Show the actual extracted results.
+        # ----------------------------------------------------
+
+        if results:
+            print(
+                f"Google {search_name} extracted Indeed results:"
+            )
+
+            for index, result in enumerate(
+                results[:10],
+                start=1,
+            ):
+                print(
+                    f"  [{index}] "
+                    f"Title: "
+                    f"{result['title'][:200]}"
+                )
+
+                print(
+                    f"      URL: "
+                    f"{result['link'][:500]}"
+                )
+
+                print(
+                    f"      Snippet: "
+                    f"{result['snippet'][:300]}"
+                )
+
         jobs = []
 
-        for result in results:
+        # ----------------------------------------------------
+        # Convert Google results into our standard job object.
+        # ----------------------------------------------------
 
+        for result in results:
             title = clean_indeed_title(
-                result["title"]
+                result.get(
+                    "title",
+                    "",
+                )
             )
-            snippet = result["snippet"].strip()
+
+            snippet = result.get(
+                "snippet",
+                "",
+            ).strip()
 
             combined_text = (
                 f"{title} {snippet}"
@@ -633,15 +1131,35 @@ def fetch_google_indeed(search_name, query):
                 "title": title,
                 "company": company,
                 "location": location,
-                "link": normalize_url(
-                    result["link"],
-                    "https://ca.indeed.com",
+                "link": normalize_indeed_job_url(
+                    result["link"]
                 ),
                 "source": "Indeed",
             }
 
+            # ------------------------------------------------
+            # Diagnostic rejection logging.
+            # ------------------------------------------------
+
             if is_relevant(job):
-                jobs.append(job)
+                jobs.append(
+                    job
+                )
+
+                print(
+                    "  ACCEPTED Indeed job:"
+                    f" {title} | "
+                    f"{company} | "
+                    f"{location}"
+                )
+
+            else:
+                print(
+                    "  REJECTED Indeed result:"
+                    f" title='{title}' | "
+                    f"location='{location}' | "
+                    f"url='{result['link'][:200]}'"
+                )
 
         print(
             f"Google {search_name} "
@@ -654,58 +1172,78 @@ def fetch_google_indeed(search_name, query):
     except requests.RequestException as error:
         print(
             f"Google {search_name} "
-            f"request error: {error}"
+            f"request error: "
+            f"{error}"
         )
+
         return []
 
     except Exception as error:
         print(
             f"Google {search_name} "
-            f"error: {error}"
+            f"error: "
+            f"{error}"
         )
+
         return []
 
+
+# ============================================================
+# INDEED
+# ============================================================
 
 def fetch_indeed():
     """
     Discover Indeed jobs through Google.
 
-    Two searches are performed:
+    Toronto:
+        Scrum Master + Toronto/GTA terms
 
-    1. Scrum Master + Toronto/GTA
-       Google past-day filter
+    Remote:
+        Scrum Master + Remote + Canada
 
-    2. Scrum Master + Remote Canada
-       Google past-day filter
+    Google is asked for the past day.
 
-    The returned jobs are still passed through the same strict
-    Scrum Master/location filter used by the rest of the bot.
+    We intentionally do not request Indeed directly because
+    Indeed was returning HTTP 403 from GitHub Actions.
     """
 
     toronto_locations_query = (
-        '("Toronto" OR "Greater Toronto Area" OR '
-        '"North York" OR "Scarborough" OR "Etobicoke" OR '
-        '"Markham" OR "Richmond Hill" OR "Vaughan" OR '
-        '"Thornhill" OR "Mississauga" OR "Brampton" OR '
-        '"Oakville" OR "Ajax" OR "Pickering" OR "Whitby" OR '
-        '"Oshawa" OR "GTA")'
+        '("Toronto" OR '
+        '"Greater Toronto Area" OR '
+        '"North York" OR '
+        '"Scarborough" OR '
+        '"Etobicoke" OR '
+        '"Markham" OR '
+        '"Richmond Hill" OR '
+        '"Vaughan" OR '
+        '"Thornhill" OR '
+        '"Mississauga" OR '
+        '"Brampton" OR '
+        '"Oakville" OR '
+        '"Ajax" OR '
+        '"Pickering" OR '
+        '"Whitby" OR '
+        '"Oshawa" OR '
+        '"GTA")'
     )
 
     searches = [
         (
             "Toronto",
             (
-                'site:indeed.com/viewjob '
-                'intitle:"Scrum Master" '
+                'site:ca.indeed.com '
+                '"Scrum Master" '
                 f"{toronto_locations_query}"
             ),
         ),
         (
             "Remote Canada",
             (
-                'site:indeed.com/viewjob '
-                'intitle:"Scrum Master" '
-                '("remote" OR "work from home") '
+                'site:ca.indeed.com '
+                '"Scrum Master" '
+                '("remote" OR '
+                '"work from home") '
                 'Canada'
             ),
         ),
@@ -725,7 +1263,9 @@ def fetch_indeed():
     unique_jobs = {}
 
     for job in jobs:
-        unique_jobs[job_id(job)] = job
+        unique_jobs[
+            job_id(job)
+        ] = job
 
     jobs = list(
         unique_jobs.values()
@@ -733,7 +1273,8 @@ def fetch_indeed():
 
     print(
         f"Indeed Scrum Master jobs "
-        f"(via Google): {len(jobs)}"
+        f"(via Google): "
+        f"{len(jobs)}"
     )
 
     return jobs
@@ -781,7 +1322,8 @@ def fetch_linkedin():
     for search_name, url in search_urls:
 
         print(
-            f"Searching LinkedIn: {search_name}"
+            f"Searching LinkedIn: "
+            f"{search_name}"
         )
 
         try:
@@ -798,12 +1340,17 @@ def fetch_linkedin():
                 "html.parser",
             )
 
-            cards = soup.select("li")
+            cards = soup.select(
+                "li"
+            )
 
             print(
                 f"LinkedIn {search_name} "
-                f"cards found: {len(cards)}"
+                f"cards found: "
+                f"{len(cards)}"
             )
+
+            relevant_count = 0
 
             for card in cards:
 
@@ -831,7 +1378,10 @@ def fetch_linkedin():
                             "a"
                         )
 
-                    if not title_el or not link_el:
+                    if (
+                        not title_el
+                        or not link_el
+                    ):
                         continue
 
                     raw_link = link_el.get(
@@ -878,24 +1428,38 @@ def fetch_linkedin():
                     }
 
                     if is_relevant(job):
-                        jobs.append(job)
+                        jobs.append(
+                            job
+                        )
+
+                        relevant_count += 1
 
                 except Exception as error:
                     print(
-                        f"LinkedIn card error: {error}"
+                        f"LinkedIn card error: "
+                        f"{error}"
                     )
+
                     continue
+
+            print(
+                f"LinkedIn {search_name} "
+                f"relevant Scrum Master jobs: "
+                f"{relevant_count}"
+            )
 
         except requests.RequestException as error:
             print(
                 f"LinkedIn {search_name} "
-                f"request error: {error}"
+                f"request error: "
+                f"{error}"
             )
 
         except Exception as error:
             print(
                 f"LinkedIn {search_name} "
-                f"error: {error}"
+                f"error: "
+                f"{error}"
             )
 
     return jobs
@@ -915,12 +1479,17 @@ def fetch_all():
 
     linkedin_jobs = fetch_linkedin()
 
-    jobs = indeed_jobs + linkedin_jobs
+    jobs = (
+        indeed_jobs
+        + linkedin_jobs
+    )
 
     unique_jobs = {}
 
     for job in jobs:
-        unique_jobs[job_id(job)] = job
+        unique_jobs[
+            job_id(job)
+        ] = job
 
     jobs = list(
         unique_jobs.values()
@@ -964,16 +1533,20 @@ def load_seen():
         return {}
 
     try:
-
         with open(
             SEEN_FILE,
             "r",
             encoding="utf-8",
         ) as file:
 
-            data = json.load(file)
+            data = json.load(
+                file
+            )
 
-        if isinstance(data, dict):
+        if isinstance(
+            data,
+            dict,
+        ):
             return data
 
         print(
@@ -986,7 +1559,8 @@ def load_seen():
     except Exception as error:
 
         print(
-            f"Could not load {SEEN_FILE}: "
+            f"Could not load "
+            f"{SEEN_FILE}: "
             f"{error}"
         )
 
@@ -1123,8 +1697,11 @@ def send_email(jobs):
         "EMAIL_TO"
     )
 
-    # Email is optional.
-    if not email_user or not email_pass or not email_to:
+    if (
+        not email_user
+        or not email_pass
+        or not email_to
+    ):
 
         print(
             "Email is not configured. "
@@ -1171,7 +1748,8 @@ def send_email(jobs):
     except Exception as error:
 
         print(
-            f"Email error: {error}"
+            f"Email error: "
+            f"{error}"
         )
 
         return False
@@ -1267,8 +1845,9 @@ def send_telegram(jobs):
 
         result = response.json()
 
-        if not result.get("ok"):
-
+        if not result.get(
+            "ok"
+        ):
             raise RuntimeError(
                 f"Telegram API error: "
                 f"{result}"
@@ -1283,7 +1862,8 @@ def send_telegram(jobs):
     except Exception as error:
 
         print(
-            f"Telegram error: {error}"
+            f"Telegram error: "
+            f"{error}"
         )
 
         return False
@@ -1295,9 +1875,17 @@ def send_telegram(jobs):
 
 def main():
 
-    print("=" * 60)
-    print("Scrum Master Job Alerts")
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
+
+    print(
+        "Scrum Master Job Alerts"
+    )
+
+    print(
+        "=" * 60
+    )
 
     # --------------------------------------------------------
     # Search
@@ -1319,10 +1907,14 @@ def main():
 
     for job in jobs:
 
-        key = job_id(job)
+        key = job_id(
+            job
+        )
 
         if key not in seen:
-            new_jobs.append(job)
+            new_jobs.append(
+                job
+            )
 
     print(
         f"New Scrum Master jobs: "
@@ -1345,7 +1937,9 @@ def main():
     # Display jobs in GitHub Actions log
     # --------------------------------------------------------
 
-    print("New jobs:")
+    print(
+        "New jobs:"
+    )
 
     for job in new_jobs:
 
@@ -1354,6 +1948,10 @@ def main():
             f"{job['company']} | "
             f"{job['location']} | "
             f"{job['source']}"
+        )
+
+        print(
+            f"    {job['link']}"
         )
 
     # --------------------------------------------------------
@@ -1427,7 +2025,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # IMPORTANT
+    # IMPORTANT:
     #
     # Do NOT update seen.json if any configured
     # notification channel failed.
@@ -1455,7 +2053,9 @@ def main():
 
     for job in new_jobs:
 
-        key = job_id(job)
+        key = job_id(
+            job
+        )
 
         updated_seen[key] = {
             "title": job["title"],
