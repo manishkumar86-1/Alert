@@ -36,137 +36,332 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Test external connectivity
-        run: |
-          python - <<'PY'
-          import requests
-
-          urls = [
-              "https://www.google.com",
-              "https://ca.indeed.com",
-              "https://www.linkedin.com",
-          ]
-
-          for url in urls:
-              print(f"\nTesting: {url}")
-
-              try:
-                  response = requests.get(
-                      url,
-                      timeout=(10, 20),
-                      headers={
-                          "User-Agent": (
-                              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/154.0.0.0 Safari/537.36"
-                          )
-                      },
-                      allow_redirects=True,
-                  )
-
-                  print("Status:", response.status_code)
-                  print("Final URL:", response.url)
-                  print("Response length:", len(response.content))
-
-              except Exception as e:
-                  print("ERROR:", repr(e))
-          PY
-
-      - name: Inspect LinkedIn job page
+      - name: Debug job source searches
         run: |
           python - <<'PY'
           import requests
           from bs4 import BeautifulSoup
 
-          url = (
-              "https://www.linkedin.com/jobs/search/"
-              "?keywords=Scrum%20Master"
-              "&location=Toronto"
-              "&f_TPR=r3600"
-          )
-
-          headers = {
+          HEADERS = {
               "User-Agent": (
                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/154.0.0.0 Safari/537.36"
               ),
               "Accept-Language": "en-US,en;q=0.9",
+              "Accept": (
+                  "text/html,application/xhtml+xml,"
+                  "application/xml;q=0.9,image/avif,image/webp,"
+                  "*/*;q=0.8"
+              ),
           }
 
-          response = requests.get(
-              url,
-              headers=headers,
-              timeout=(10, 20),
-              allow_redirects=True,
-          )
+          TIMEOUT = (10, 20)
 
-          print("Status:", response.status_code)
-          print("Final URL:", response.url)
-          print("Response length:", len(response.text))
-
-          soup = BeautifulSoup(
-              response.text,
-              "html.parser",
-          )
-
-          print("\n--- LinkedIn selectors ---")
-
-          selectors = [
-              "li",
-              "li.base-card",
-              "h3",
-              "h4",
-              ".job-search-card__location",
-              "a.base-card__full-link",
-              "a[href*='/jobs/view/']",
+          searches = [
+              (
+                  "Indeed Toronto",
+                  (
+                      "https://ca.indeed.com/jobs"
+                      "?q=%22Scrum+Master%22"
+                      "&l=Toronto%2C+ON"
+                      "&fromage=1"
+                  ),
+              ),
+              (
+                  "Indeed Remote Canada",
+                  (
+                      "https://ca.indeed.com/jobs"
+                      "?q=%22Scrum+Master%22"
+                      "&l=Canada"
+                      "&sc=0kf%3Aattr%28DSQF7%29%3B"
+                      "&fromage=1"
+                  ),
+              ),
+              (
+                  "LinkedIn Toronto",
+                  (
+                      "https://www.linkedin.com/jobs/search/"
+                      "?keywords=Scrum%20Master"
+                      "&location=Toronto"
+                      "&f_TPR=r3600"
+                  ),
+              ),
+              (
+                  "LinkedIn Remote Canada",
+                  (
+                      "https://www.linkedin.com/jobs/search/"
+                      "?keywords=Scrum%20Master"
+                      "&location=Canada"
+                      "&f_WT=2"
+                      "&f_TPR=r3600"
+                  ),
+              ),
           ]
 
-          for selector in selectors:
-              elements = soup.select(selector)
+          for name, url in searches:
 
-              print(
-                  f"{selector}: {len(elements)} found"
-              )
+              print("\n")
+              print("=" * 70)
+              print(name)
+              print("=" * 70)
+              print("Requested URL:")
+              print(url)
 
-          print("\n--- First 10 h3 titles ---")
+              try:
+                  response = requests.get(
+                      url,
+                      headers=HEADERS,
+                      timeout=TIMEOUT,
+                      allow_redirects=True,
+                  )
 
-          for element in soup.select("h3")[:10]:
-              print(
-                  repr(
-                      element.get_text(
-                          " ",
-                          strip=True,
+                  print("\nHTTP status:")
+                  print(response.status_code)
+
+                  print("\nFinal URL:")
+                  print(response.url)
+
+                  print("\nResponse length:")
+                  print(len(response.text))
+
+                  soup = BeautifulSoup(
+                      response.text,
+                      "html.parser",
+                  )
+
+                  page_text = soup.get_text(
+                      " ",
+                      strip=True,
+                  )
+
+                  lower_text = page_text.lower()
+
+                  lower_html = response.text.lower()
+
+                  print("\n'Scrum Master' occurrences in text:")
+                  print(
+                      lower_text.count(
+                          "scrum master"
                       )
                   )
-              )
 
-          print("\n--- First 10 job links ---")
-
-          links = soup.select(
-              "a[href*='/jobs/view/']"
-          )
-
-          for link in links[:10]:
-              print(
-                  link.get("href")
-              )
-
-          print("\n--- First 10 locations ---")
-
-          locations = soup.select(
-              ".job-search-card__location"
-          )
-
-          for location in locations[:10]:
-              print(
-                  repr(
-                      location.get_text(
-                          " ",
-                          strip=True,
+                  print("\n'Scrum Master' occurrences in HTML:")
+                  print(
+                      lower_html.count(
+                          "scrum master"
                       )
                   )
-              )
+
+                  # --------------------------------------------------
+                  # Indeed diagnostics
+                  # --------------------------------------------------
+
+                  if "indeed" in name.lower():
+
+                      print("\nIndeed selectors:")
+
+                      selectors = [
+                          "a.tapItem",
+                          "h2 span",
+                          ".companyName",
+                          ".companyLocation",
+                          "a[href*='/viewjob']",
+                      ]
+
+                      for selector in selectors:
+                          print(
+                              f"{selector}: "
+                              f"{len(soup.select(selector))}"
+                          )
+
+                      cards = soup.select(
+                          "a.tapItem"
+                      )
+
+                      print(
+                          "\nIndeed job cards:",
+                          len(cards),
+                      )
+
+                      for index, card in enumerate(
+                          cards[:10],
+                          start=1,
+                      ):
+
+                          title_el = card.select_one(
+                              "h2 span"
+                          )
+
+                          company_el = card.select_one(
+                              ".companyName"
+                          )
+
+                          location_el = card.select_one(
+                              ".companyLocation"
+                          )
+
+                          title = (
+                              title_el.get_text(
+                                  " ",
+                                  strip=True,
+                              )
+                              if title_el
+                              else "NO TITLE"
+                          )
+
+                          company = (
+                              company_el.get_text(
+                                  " ",
+                                  strip=True,
+                              )
+                              if company_el
+                              else "NO COMPANY"
+                          )
+
+                          location = (
+                              location_el.get_text(
+                                  " ",
+                                  strip=True,
+                              )
+                              if location_el
+                              else "NO LOCATION"
+                          )
+
+                          print(
+                              f"{index}. {title}"
+                          )
+
+                          print(
+                              f"   Company: {company}"
+                          )
+
+                          print(
+                              f"   Location: {location}"
+                          )
+
+                  # --------------------------------------------------
+                  # LinkedIn diagnostics
+                  # --------------------------------------------------
+
+                  if "linkedin" in name.lower():
+
+                      print("\nLinkedIn selectors:")
+
+                      selectors = [
+                          "li",
+                          "li.base-card",
+                          "h3",
+                          "h4",
+                          ".job-search-card__location",
+                          "a.base-card__full-link",
+                          "a[href*='/jobs/view/']",
+                      ]
+
+                      for selector in selectors:
+                          print(
+                              f"{selector}: "
+                              f"{len(soup.select(selector))}"
+                          )
+
+                      links = soup.select(
+                          "a[href*='/jobs/view/']"
+                      )
+
+                      print(
+                          "\nLinkedIn job links:",
+                          len(links),
+                      )
+
+                      for index, link in enumerate(
+                          links[:10],
+                          start=1,
+                      ):
+
+                          card = link.find_parent(
+                              "li"
+                          )
+
+                          title_el = (
+                              card.select_one("h3")
+                              if card
+                              else None
+                          )
+
+                          company_el = (
+                              card.select_one("h4")
+                              if card
+                              else None
+                          )
+
+                          location_el = (
+                              card.select_one(
+                                  ".job-search-card__location"
+                              )
+                              if card
+                              else None
+                          )
+
+                          title = (
+                              title_el.get_text(
+                                  " ",
+                                  strip=True,
+                              )
+                              if title_el
+                              else link.get_text(
+                                  " ",
+                                  strip=True,
+                              )
+                          )
+
+                          company = (
+                              company_el.get_text(
+                                  " ",
+                                  strip=True,
+                              )
+                              if company_el
+                              else "NO COMPANY"
+                          )
+
+                          location = (
+                              location_el.get_text(
+                                  " ",
+                                  strip=True,
+                              )
+                              if location_el
+                              else "NO LOCATION"
+                          )
+
+                          print(
+                              f"{index}. {title}"
+                          )
+
+                          print(
+                              f"   Company: {company}"
+                          )
+
+                          print(
+                              f"   Location: {location}"
+                          )
+
+                          print(
+                              f"   URL: {link.get('href')}"
+                          )
+
+              except Exception as error:
+
+                  print(
+                      "\nREQUEST/PROCESSING ERROR:"
+                  )
+
+                  print(
+                      repr(error)
+                  )
+
+          print("\n")
+          print("=" * 70)
+          print("END OF SOURCE DIAGNOSTICS")
+          print("=" * 70)
           PY
 
       - name: Check Scrum Master jobs
