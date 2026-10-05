@@ -61,23 +61,49 @@ REMOTE_CANADA_TERMS = [
 ]
 
 
+LINKEDIN_TITLE_KEYWORDS = [
+    "scrum master",
+    "manual qa",
+    "manual tester",
+    "qa tester",
+    "qa analyst",
+    "quality assurance",
+    "software tester",
+    "test analyst",
+    "test engineer",
+    "uat",
+    "agile",
+    "product owner",
+]
+
+
 # ============================================================
 # LINKEDIN LOCATION FILTER
 # ============================================================
 
+def is_linkedin_title_match(title):
+    """
+    Return True when the LinkedIn job title contains
+    at least one configured job-title keyword.
+    """
+
+    title = (
+        title
+        or ""
+    ).strip().lower()
+
+    if not title:
+        return False
+
+    return any(
+        keyword in title
+        for keyword in LINKEDIN_TITLE_KEYWORDS
+    )
+
+
 def is_linkedin_location_match(location):
     """
-    Current TEST MODE.
-
-    LinkedIn title filtering is intentionally disabled.
-
-    We are testing whether LinkedIn can reliably return:
-      1. Toronto/GTA jobs
-      2. Remote Canada jobs
-      3. Posted within the last hour
-
-    Title filtering will be restored after acquisition,
-    notification, and persistence are verified.
+    Match Toronto/GTA jobs and Remote Canada jobs.
     """
 
     location = (
@@ -405,18 +431,15 @@ def fetch_indeed():
 
 def fetch_linkedin():
     """
-    TEST MODE.
-
-    LinkedIn searches are intentionally NOT restricted
-    by keywords.
+    LinkedIn searches are filtered by:
+    - Toronto/GTA or Remote Canada location
+    - configured job-title keywords
 
     Toronto:
         last 1 hour
 
     Remote Canada:
         last 1 hour
-
-    Title filtering is intentionally disabled for this test.
     """
 
     search_urls = [
@@ -574,10 +597,9 @@ def fetch_linkedin():
                         "source": "LinkedIn",
                     }
 
-                    # TEST MODE:
-                    # Only location is filtered.
-                    if is_linkedin_location_match(
-                        location
+                    if (
+                        is_linkedin_location_match(location)
+                        and is_linkedin_title_match(title)
                     ):
                         jobs.append(job)
 
